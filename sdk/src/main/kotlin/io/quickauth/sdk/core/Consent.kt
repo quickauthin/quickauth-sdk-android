@@ -19,7 +19,7 @@ open class Consent(private val storage: Storage) {
     /**
      * Hook used by [ApiClient] before each call.  Returns `true` if the SDK is allowed to
      * actually hit the network for the supplied [path].  Default behaviour: gate everything
-     * except the `auth/*` endpoints, which are required for the user to log in at all.
+     * except the `auth/...` endpoints, which are required for the user to log in at all.
      */
     open fun allowsRequest(path: String): Boolean {
         if (path.contains("/auth/")) return true

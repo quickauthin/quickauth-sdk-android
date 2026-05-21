@@ -6,8 +6,7 @@ plugins {
     id("com.android.library") version "8.2.2" apply false
     id("com.android.application") version "8.2.2" apply false
     id("org.jetbrains.kotlin.android") version "1.9.20" apply false
-    id("maven-publish")
-    id("signing") apply false
+    id("com.gradleup.nmcp") version "0.0.9" apply false
 }
 
 tasks.register("clean", Delete::class) {

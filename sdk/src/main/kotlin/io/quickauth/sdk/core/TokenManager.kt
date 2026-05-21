@@ -26,7 +26,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
  * The class deliberately avoids any Android dependency so it's trivially unit-testable on
  * a plain JVM.
  */
-internal class TokenManager(
+class TokenManager(
     private val config: Config,
     initialToken: String? = config.initialToken,
     private val unsafeHttpClient: OkHttpClient? = null,

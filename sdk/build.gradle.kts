@@ -3,6 +3,15 @@ plugins {
     id("org.jetbrains.kotlin.android")
     id("maven-publish")
     id("signing")
+    id("com.gradleup.nmcp")
+}
+
+nmcp {
+    publishAllPublications {
+        username = (findProperty("sonatypeUsername") as String?) ?: System.getenv("SONATYPE_USERNAME") ?: ""
+        password = (findProperty("sonatypePassword") as String?) ?: System.getenv("SONATYPE_PASSWORD") ?: ""
+        publicationType = "USER_MANAGED"
+    }
 }
 
 android {
@@ -129,16 +138,6 @@ afterEvaluate {
                         developerConnection.set("scm:git:ssh://github.com/quickauthin/quickauth-sdk-android.git")
                         url.set("https://github.com/quickauthin/quickauth-sdk-android")
                     }
-                }
-            }
-        }
-        repositories {
-            maven {
-                name = "sonatypeCentral"
-                url = uri("https://central.sonatype.com/api/v1/publisher/upload")
-                credentials {
-                    username = (findProperty("sonatypeUsername") as String?) ?: System.getenv("SONATYPE_USERNAME")
-                    password = (findProperty("sonatypePassword") as String?) ?: System.getenv("SONATYPE_PASSWORD")
                 }
             }
         }
