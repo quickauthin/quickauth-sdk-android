@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    QuickAuth Android SDK manifest.
+
+    Intentionally requests **no permissions**. The SMS Retriever API delivers OTP messages
+    via a system broadcast scoped to the receiving app's hash, so it does not need
+    READ_SMS or RECEIVE_SMS. The Install Referrer API talks to the Play Store via an
+    AIDL service that is added implicitly by the installreferrer dependency.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- No permissions — SMS Retriever + Install Referrer require none. -->
+</manifest>
