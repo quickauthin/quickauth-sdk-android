@@ -42,7 +42,10 @@ enum class ButtonStyle { PRIMARY, GHOST, WHATSAPP }
  *
  * Component-mode entry point: handles the full OTP flow internally — calls
  * [QuickAuth.auth.startOTP] in the background, shows a small inline OTP entry, then
- * invokes [onSuccess] with the JWT (or [onError] on failure).
+ * invokes [onSessionStarted] with the sessionId once the OTP has been dispatched.
+ * Pair with a [QuickAuthOtpField] subscribed to `QuickAuth.auth.observeOTP()`
+ * to complete the verification — your backend then confirms server-to-server
+ * and mints its own session JWT (QuickAuth is verification-only).
  *
  * For more control use the headless API: [QuickAuth.auth] directly.
  *
@@ -53,7 +56,7 @@ enum class ButtonStyle { PRIMARY, GHOST, WHATSAPP }
 @Composable
 fun QuickAuthLoginButton(
     phone: String,
-    onSuccess: (jwt: String) -> Unit,
+    onSessionStarted: (sessionId: String) -> Unit,
     onError: (Throwable) -> Unit,
     modifier: Modifier = Modifier,
     text: String = "Continue with QuickAuth",
@@ -84,10 +87,10 @@ fun QuickAuthLoginButton(
                         val session = QuickAuth.auth.startOTP(phone, channel)
                         // The fully drop-in flow assumes the host app pairs this button
                         // with a [QuickAuthOtpField] subscribed to observeOTP().  We surface
-                        // the sessionId via onError-like callback so the caller can route
-                        // the next step.  In practice the most common pattern is the
-                        // headless API; the button is a "happy path" CTA only.
-                        onSuccess("session:${session.sessionId}")
+                        // the sessionId so the caller can route the next step.  In practice
+                        // the most common pattern is the headless API; the button is a
+                        // "happy path" CTA only.
+                        onSessionStarted(session.sessionId)
                     } catch (t: Throwable) {
                         onError(t)
                     } finally {
