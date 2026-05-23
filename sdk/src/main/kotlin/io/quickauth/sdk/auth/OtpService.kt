@@ -46,10 +46,14 @@ class OtpService internal constructor(
     /**
      * Verify the 6-digit code the user typed.
      *
+     * QuickAuth is a verification provider, not an identity provider — we tell
+     * you whether the phone was verified, and that's it. Forward [VerifyResult.requestId]
+     * to *your* backend, which confirms with QuickAuth server-to-server via
+     * `GET /v1/auth/status?requestId=...` and mints its own session JWT against
+     * its own user table. See https://quickauth.in/docs/backend
+     *
      * @param sessionId the value returned from [startOTP].
      * @param code 4-8 digit numeric OTP.
-     * @return [VerifyResult] holding the short-lived JWT — pass it to **your** backend so
-     *         your backend can call `/v1/sdk/auth/introspect` to validate it.
      */
     suspend fun verifyOTP(sessionId: String, code: String): VerifyResult {
         require(sessionId.isNotBlank()) { "sessionId must not be blank" }
@@ -62,7 +66,11 @@ class OtpService internal constructor(
             ),
             clazz = VerifyResponse::class.java,
         )
-        return VerifyResult(jwt = resp.jwt, expiresIn = resp.expiresIn)
+        return VerifyResult(
+            verified  = resp.verified,
+            requestId = resp.requestId,
+            message   = resp.message,
+        )
     }
 
     /**
@@ -99,14 +107,26 @@ class OtpService internal constructor(
     /** Response payload from `/v1/sdk/auth/initiate`. Internal so tests can construct it. */
     internal data class InitiateResponse(val sessionId: String, val expiresIn: Int)
 
-    /** Response payload from `/v1/sdk/auth/verify`. */
-    internal data class VerifyResponse(val jwt: String, val expiresIn: Int)
+    /** Response payload from `/v1/sdk/auth/verify`. Matches the backend SdkOtpVerifyResponse record. */
+    internal data class VerifyResponse(val verified: Boolean, val requestId: String, val message: String)
 
     /** Public session handle returned to callers of [startOTP]. */
     data class Session(val sessionId: String, val expiresIn: Int)
 
-    /** Public verify result returned to callers of [verifyOTP]. */
-    data class VerifyResult(val jwt: String, val expiresIn: Int)
+    /**
+     * Public verify result returned to callers of [verifyOTP].
+     *
+     * QuickAuth never issues a session JWT here — your backend mints one against
+     * its own user table after confirming the [requestId] server-to-server.
+     */
+    data class VerifyResult(
+        /** True iff the OTP matched and the phone is now verified. */
+        val verified: Boolean,
+        /** Opaque id — forward this to your backend for server-to-server confirmation. */
+        val requestId: String,
+        /** Human-readable status, e.g. "Verified successfully". */
+        val message: String,
+    )
 
     companion object {
         private val CODE_REGEX = Regex("^\\d{4,8}$")

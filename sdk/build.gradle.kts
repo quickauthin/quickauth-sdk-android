@@ -113,7 +113,7 @@ afterEvaluate {
                 from(components["release"])
                 groupId = "in.quickauth"
                 artifactId = "sdk"
-                version = "0.1.0"
+                version = "1.0.0"
                 pom {
                     name.set("QuickAuth Android SDK")
                     description.set("Phone OTP auth + WhatsApp marketing attribution SDK for Android.")

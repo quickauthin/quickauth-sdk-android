@@ -33,7 +33,7 @@ import kotlin.coroutines.CoroutineContext
  * Then in code:
  * ```kotlin
  * qaButton.phone = "+919876543210"
- * qaButton.onSuccess = { jwt -> /* handle */ }
+ * qaButton.onSessionStarted = { sessionId -> /* pair with QuickAuthOtpField */ }
  * qaButton.onError = { err -> /* handle */ }
  * ```
  */
@@ -52,7 +52,7 @@ class QuickAuthLoginButtonView @JvmOverloads constructor(
 
     var phone: String = ""
     var channel: OtpChannel = OtpChannel.AUTO
-    var onSuccess: (String) -> Unit = {}
+    var onSessionStarted: (sessionId: String) -> Unit = {}
     var onError: (Throwable) -> Unit = {}
     var labelText: String = "Continue with QuickAuth"
         set(v) { field = v; label.text = v }
@@ -114,7 +114,7 @@ class QuickAuthLoginButtonView @JvmOverloads constructor(
         launch {
             try {
                 val session = QuickAuth.auth.startOTP(phone, channel)
-                onSuccess("session:${session.sessionId}")
+                onSessionStarted(session.sessionId)
             } catch (t: Throwable) {
                 onError(t)
             } finally {

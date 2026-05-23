@@ -2,7 +2,7 @@
 
 Phone OTP authentication + WhatsApp marketing attribution for Android, in a single Kotlin library.
 
-`io.quickauth:sdk:0.1.0` — minSdk 21, Compose-first with View-based fallback, zero permissions.
+`in.quickauth:sdk:1.0.0` — minSdk 21, Compose-first with View-based fallback, zero permissions.
 
 ---
 
@@ -11,7 +11,7 @@ Phone OTP authentication + WhatsApp marketing attribution for Android, in a sing
 ```kotlin
 // app/build.gradle.kts
 dependencies {
-    implementation("io.quickauth:sdk:0.1.0")
+    implementation("in.quickauth:sdk:1.0.0")
 }
 ```
 
@@ -106,7 +106,13 @@ QuickAuth.init(
 val session = QuickAuth.auth.startOTP("+919876543210", channel = OtpChannel.AUTO)
 QuickAuth.auth.observeOTP { code ->
     val result = QuickAuth.auth.verifyOTP(session.sessionId, code)
-    sendToMyBackend(result.jwt)        // short-lived, validate via /v1/sdk/auth/introspect
+    // result.verified == true, result.requestId == "req_…", result.message == "Verified successfully"
+    //
+    // Forward result.requestId to YOUR backend, which confirms with QuickAuth via
+    // GET /v1/auth/status?requestId=... (X-Client-Id / X-Client-Secret) and mints
+    // its own session JWT against its own user table.
+    // See https://quickauth.in/docs/backend
+    if (result.verified) sendToMyBackend(result.requestId)
 }
 ```
 
