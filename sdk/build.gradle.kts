@@ -105,7 +105,7 @@ dependencies {
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 }
 
-// Publishing — Maven Central group in.quickauth, artifact sdk, version 0.1.0.
+// Publishing — Maven Central group in.quickauth, artifact sdk.
 afterEvaluate {
     publishing {
         publications {
@@ -113,7 +113,7 @@ afterEvaluate {
                 from(components["release"])
                 groupId = "in.quickauth"
                 artifactId = "sdk"
-                version = "1.0.0"
+                version = "1.1.0"
                 pom {
                     name.set("QuickAuth Android SDK")
                     description.set("Phone OTP auth + WhatsApp marketing attribution SDK for Android.")
