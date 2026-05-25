@@ -76,7 +76,7 @@ object QuickAuth {
             tokenManager = tokenManager,
         )
         val smsRetriever = SmsRetriever(appCtx)
-        val otpService = OtpService(apiClient, smsRetriever)
+        val otpService = OtpService(apiClient, smsRetriever, storage) { config }
         val attributionService = AttributionService(appCtx, apiClient)
 
         state = State(

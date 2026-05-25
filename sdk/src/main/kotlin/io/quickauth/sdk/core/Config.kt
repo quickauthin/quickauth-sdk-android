@@ -1,5 +1,7 @@
 package io.quickauth.sdk.core
 
+import io.quickauth.sdk.auth.AuthEventHandler
+
 /**
  * Suspend lambda that returns a fresh ephemeral SDK session JWT.
  *
@@ -34,6 +36,13 @@ public data class Config(
     val unsafeDirectClientId: String? = null,
     val unsafeDirectClientSecret: String? = null,
     val userAgent: String = "quickauth-sdk-android/$SDK_VERSION",
+    /**
+     * Headless auth event handler. Invoked on the main thread with a typed
+     * [io.quickauth.sdk.auth.AuthEvent] as the auth lifecycle progresses
+     * (OTP sent, verified, failed, error). One handler per Config; assign
+     * a new lambda to replace.
+     */
+    val onAuthEvent: AuthEventHandler? = null,
 ) {
     init {
         require(apiBaseUrl.startsWith("http")) { "apiBaseUrl must be an absolute URL" }
@@ -48,6 +57,6 @@ public data class Config(
 
     public companion object {
         public const val DEFAULT_API_BASE_URL: String = "https://api.quickauth.in"
-        public const val SDK_VERSION: String = "0.1.0"
+        public const val SDK_VERSION: String = "1.1.0"
     }
 }

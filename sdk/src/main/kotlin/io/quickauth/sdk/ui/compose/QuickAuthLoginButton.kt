@@ -56,7 +56,7 @@ enum class ButtonStyle { PRIMARY, GHOST, WHATSAPP }
 @Composable
 fun QuickAuthLoginButton(
     phone: String,
-    onSessionStarted: (sessionId: String) -> Unit,
+    onInitiated: () -> Unit,
     onError: (Throwable) -> Unit,
     modifier: Modifier = Modifier,
     text: String = "Continue with QuickAuth",
@@ -84,13 +84,12 @@ fun QuickAuthLoginButton(
                 loading = true
                 scope.launch {
                     try {
-                        val session = QuickAuth.auth.startOTP(phone, channel)
-                        // The fully drop-in flow assumes the host app pairs this button
-                        // with a [QuickAuthOtpField] subscribed to observeOTP().  We surface
-                        // the sessionId so the caller can route the next step.  In practice
-                        // the most common pattern is the headless API; the button is a
-                        // "happy path" CTA only.
-                        onSessionStarted(session.sessionId)
+                        // Kicks off the state machine; outcomes (OtpSent / Verified /
+                        // OtpFailed / Error) arrive via Config.onAuthEvent. This button
+                        // is a thin trigger — the host app subscribes to AuthEvent to
+                        // route the actual UI transitions.
+                        QuickAuth.auth.initiate(phone, channel)
+                        onInitiated()
                     } catch (t: Throwable) {
                         onError(t)
                     } finally {

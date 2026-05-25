@@ -78,20 +78,13 @@ private fun SampleScreen() {
         BasicTextField(value = phone, onValueChange = { phone = it })
         Button(onClick = {
             scope.launch {
-                runCatching {
-                    val s = QuickAuth.auth.startOTP(phone, OtpChannel.AUTO)
-                    session = s.sessionId
-                }
+                runCatching { QuickAuth.auth.initiate(phone, OtpChannel.AUTO) }
             }
         }) { Text("Send OTP (headless)") }
 
         QuickAuthOtpField(value = otp, onValueChange = { otp = it }, onCodeFilled = { code ->
-            session?.let { sid ->
-                scope.launch {
-                    runCatching {
-                        jwt = QuickAuth.auth.verifyOTP(sid, code).jwt
-                    }
-                }
+            scope.launch {
+                runCatching { QuickAuth.auth.submitOtp(code) }
             }
         })
 
@@ -99,7 +92,7 @@ private fun SampleScreen() {
         Text("Component mode", style = MaterialTheme.typography.titleMedium)
         QuickAuthLoginButton(
             phone = phone,
-            onSuccess = { jwt = it },
+            onInitiated = { /* AuthEvent.OtpSent or .Verified arrives via Config.onAuthEvent */ },
             onError = { /* show snackbar */ },
         )
         Text("JWT: ${jwt ?: "—"}")

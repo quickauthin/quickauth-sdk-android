@@ -52,7 +52,7 @@ class QuickAuthLoginButtonView @JvmOverloads constructor(
 
     var phone: String = ""
     var channel: OtpChannel = OtpChannel.AUTO
-    var onSessionStarted: (sessionId: String) -> Unit = {}
+    var onInitiated: () -> Unit = {}
     var onError: (Throwable) -> Unit = {}
     var labelText: String = "Continue with QuickAuth"
         set(v) { field = v; label.text = v }
@@ -113,8 +113,10 @@ class QuickAuthLoginButtonView @JvmOverloads constructor(
         isEnabled = false
         launch {
             try {
-                val session = QuickAuth.auth.startOTP(phone, channel)
-                onSessionStarted(session.sessionId)
+                // Kicks off the state machine; outcomes (OtpSent / Verified /
+                // OtpFailed / Error) arrive via Config.onAuthEvent.
+                QuickAuth.auth.initiate(phone, channel)
+                onInitiated()
             } catch (t: Throwable) {
                 onError(t)
             } finally {

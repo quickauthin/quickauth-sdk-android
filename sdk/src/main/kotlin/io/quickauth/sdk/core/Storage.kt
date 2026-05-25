@@ -36,6 +36,20 @@ class Storage(context: Context) {
         get() = prefs.getBoolean(KEY_INSTALL_REPORTED, false)
         set(value) = prefs.edit().putBoolean(KEY_INSTALL_REPORTED, value).apply()
 
+    /**
+     * Persistent device token for OneTap (silent re-auth). Server-minted on
+     * the first /initiate, replayed on every subsequent call. Not
+     * encrypted — the value is opaque and only useful in combination with
+     * a valid SDK session JWT, which never lives on disk.
+     */
+    var deviceToken: String?
+        get() = prefs.getString(KEY_DEVICE_TOKEN, null)
+        set(value) {
+            prefs.edit().apply {
+                if (value == null) remove(KEY_DEVICE_TOKEN) else putString(KEY_DEVICE_TOKEN, value)
+            }.apply()
+        }
+
     fun clear() {
         prefs.edit().clear().apply()
     }
@@ -47,5 +61,6 @@ class Storage(context: Context) {
         private const val KEY_CONSENT = "consent_granted"
         private const val KEY_QA_CLID = "qa_clid"
         private const val KEY_INSTALL_REPORTED = "install_reported"
+        private const val KEY_DEVICE_TOKEN = "device_token"
     }
 }
