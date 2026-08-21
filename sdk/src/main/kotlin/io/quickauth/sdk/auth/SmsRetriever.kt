@@ -92,11 +92,46 @@ class SmsRetriever(private val context: Context) {
     }
 
     companion object {
-        // Matches the first run of 4-8 digits in the SMS body.
-        private val CODE_REGEX = Regex("\\b(\\d{4,8})\\b")
+        /**
+         * The code, anchored to the word that introduces it.
+         *
+         * Only punctuation, whitespace and a short "is"/"are" may sit between the keyword and
+         * the digits. A looser gap would swallow the wrong number in bodies like
+         * "Your OTP for order 4471029 is 483920", where an unrelated reference number is the
+         * nearer match; here the gap fails and we fall through to [FALLBACK_CODE_REGEX].
+         */
+        private val KEYWORD_CODE_REGEX = Regex(
+            """(?:otp|code|pin|password)[\s:=.,\-\u2013\u2014]{0,6}(?:is|are)?[\s:=.,\-\u2013\u2014]{0,6}\b(\d{4,8})\b""",
+            RegexOption.IGNORE_CASE,
+        )
 
-        internal fun extractCode(message: String): String? =
-            CODE_REGEX.find(message)?.groupValues?.getOrNull(1)
+        /**
+         * Any standalone 4-8 digit run. `\b` keeps this from matching part of a longer run,
+         * so 10-digit phone numbers and 12-digit E.164 numbers are skipped rather than
+         * truncated into a plausible-looking code.
+         */
+        private val FALLBACK_CODE_REGEX = Regex("""\b(\d{4,8})\b""")
+
+        /**
+         * The 11-char app-hash that terminates every SMS Retriever body. It is base64 over
+         * `[A-Za-z0-9+/]`, so it can contain a digit run flanked by `+` or `/` that looks
+         * exactly like a standalone code. Strip it before scanning.
+         */
+        private val APP_HASH_SUFFIX_REGEX = Regex("""\s+[A-Za-z0-9+/]{11}\s*$""")
+
+        /**
+         * Pull the OTP out of an SMS body.
+         *
+         * Prefers a keyword-anchored match; otherwise falls back to the **last** standalone
+         * digit run. Last, not first: senders put reference numbers, order ids and amounts
+         * ahead of the code far more often than after it.
+         */
+        internal fun extractCode(message: String): String? {
+            val body = APP_HASH_SUFFIX_REGEX.replace(message, "")
+            val keyed = KEYWORD_CODE_REGEX.findAll(body).lastOrNull()
+            if (keyed != null) return keyed.groupValues[1]
+            return FALLBACK_CODE_REGEX.findAll(body).lastOrNull()?.groupValues?.get(1)
+        }
 
         /**
          * Compute the 11-character app-hash that the Google Play SMS Retriever expects at the

@@ -16,9 +16,12 @@ import java.util.concurrent.TimeUnit
  * Thin OkHttp-backed JSON client for the QuickAuth REST API.
  *
  * Features baked in:
- *  * `Authorization: Bearer <sessionToken>` — token sourced from [TokenManager], which
- *    transparently refreshes via [Config.onTokenExpiry] (or the `/v1/sdk/session` endpoint
- *    in unsafe-direct mode).
+ *  * Auth headers for whichever mode the [Config] selected:
+ *      - session-token mode: `Authorization: Bearer <sessionToken>`, sourced from
+ *        [TokenManager], which transparently refreshes via [Config.onTokenExpiry] (or the
+ *        `/v1/sdk/session` endpoint in unsafe-direct mode).
+ *      - publishable-key mode: `X-QuickAuth-Key` plus a best-effort `X-QuickAuth-Package`.
+ *        [TokenManager] is never consulted.
  *  * Auto-injected `Idempotency-Key` (UUIDv4) on every POST.
  *  * 3-attempt exponential-backoff retry on 5xx and connection errors.
  *  * On 401, [TokenManager.invalidate] is called and the request is retried exactly once
@@ -39,6 +42,12 @@ open class ApiClient @JvmOverloads constructor(
     private val consentProvider: (path: String) -> Boolean = { true },
     okHttpClient: OkHttpClient? = null,
     tokenManager: TokenManager? = null,
+    /**
+     * Host app package name, sent as `X-QuickAuth-Package` in publishable-key mode so the
+     * backend can app-lock the key.  Resolved by [io.quickauth.sdk.QuickAuth.init]; `null`
+     * when it could not be determined, in which case the header is simply omitted.
+     */
+    applicationId: String? = null,
 ) {
 
     private val gson: Gson = Gson()
@@ -51,6 +60,9 @@ open class ApiClient @JvmOverloads constructor(
         .build()
 
     internal val tokens: TokenManager = tokenManager ?: TokenManager(config)
+
+    /** Normalised once — a blank package name is no more useful to the backend than none. */
+    private val applicationId: String? = applicationId?.takeIf { it.isNotBlank() }
 
     /**
      * POST [body] (any object Gson can serialise) to [path] and decode the JSON response into [T].
@@ -65,6 +77,16 @@ open class ApiClient @JvmOverloads constructor(
         val url = "${config.apiBaseUrl.trimEnd('/')}$path"
         val payload = gson.toJson(body).toRequestBody(JSON_MEDIA)
         val idempotencyKey = UUID.randomUUID().toString()
+
+        // Publishable keys are long-lived and carry no expiry, so there is nothing to
+        // invalidate and re-mint: a 401 means the key is wrong or app-locked out, and an
+        // identical retry would fail identically. Surface it to the caller instead.
+        if (config.isPublishableKeyMode) {
+            return@withContext executeWithRetry(
+                buildRequest(url, payload, idempotencyKey, bearerToken = null),
+                clazz,
+            )
+        }
 
         // First attempt with the currently-cached (or freshly-minted) token.
         val firstToken = tokens.getToken()
@@ -81,20 +103,40 @@ open class ApiClient @JvmOverloads constructor(
         }
     }
 
+    /**
+     * Build the request for [url].  [bearerToken] is null in publishable-key mode, where no
+     * session token exists and `Authorization` must be absent — sending both credentials
+     * would leave the backend guessing which one to trust.
+     */
     private fun buildRequest(
         url: String,
         payload: okhttp3.RequestBody,
         idempotencyKey: String,
-        bearerToken: String,
-    ): Request = Request.Builder()
-        .url(url)
-        .post(payload)
-        .header("Authorization", "Bearer $bearerToken")
-        .header("Idempotency-Key", idempotencyKey)
-        .header("User-Agent", config.userAgent)
-        .header("Content-Type", "application/json")
-        .header("Accept", "application/json")
-        .build()
+        bearerToken: String?,
+    ): Request {
+        val builder = Request.Builder()
+            .url(url)
+            .post(payload)
+            .header("Idempotency-Key", idempotencyKey)
+            .header("User-Agent", config.userAgent)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+
+        if (config.isPublishableKeyMode) {
+            builder.header("X-QuickAuth-Key", config.publishableKey!!)
+            // Best effort only: OkHttp rejects header values containing control characters,
+            // and the package name comes from a Context we do not control. Losing the header
+            // is survivable while the backend's app-lock is off; failing the OTP request is
+            // not. Note that app-lock fails closed once it is enabled with no registered
+            // apps, so this fallback stops being safe the moment app-lock is turned on.
+            applicationId?.let { pkg ->
+                runCatching { builder.header("X-QuickAuth-Package", pkg) }
+            }
+        } else {
+            builder.header("Authorization", "Bearer $bearerToken")
+        }
+        return builder.build()
+    }
 
     private fun <T> executeWithRetry(request: Request, clazz: Class<T>): T {
         var lastError: Throwable? = null

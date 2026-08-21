@@ -5,8 +5,9 @@ import android.content.SharedPreferences
 
 /**
  * Tiny typed wrapper over [SharedPreferences] used to persist non-sensitive SDK state
- * (publishable key, base URL, consent flag, last-seen `qa_clid`).  The publishable key is
- * **not** secret — it's safe to ship inside the APK — so we don't bother with EncryptedSharedPreferences.
+ * (base URL, consent flag, last-seen `qa_clid`, OneTap device token).  Nothing stored here is
+ * secret, so we don't bother with EncryptedSharedPreferences.  The publishable key is not
+ * persisted at all — it is supplied on every [io.quickauth.sdk.core.Config] construction.
  *
  * Keep this class boringly small; it's mocked heavily in unit tests.
  */
@@ -14,10 +15,6 @@ class Storage(context: Context) {
 
     private val prefs: SharedPreferences =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-
-    var publicKey: String?
-        get() = prefs.getString(KEY_PUBLIC_KEY, null)
-        set(value) = prefs.edit().putString(KEY_PUBLIC_KEY, value).apply()
 
     var apiBaseUrl: String?
         get() = prefs.getString(KEY_BASE_URL, null)
@@ -56,7 +53,6 @@ class Storage(context: Context) {
 
     companion object {
         const val PREFS_NAME = "io.quickauth.sdk.prefs"
-        private const val KEY_PUBLIC_KEY = "public_key"
         private const val KEY_BASE_URL = "api_base_url"
         private const val KEY_CONSENT = "consent_granted"
         private const val KEY_QA_CLID = "qa_clid"

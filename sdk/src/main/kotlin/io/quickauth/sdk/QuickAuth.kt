@@ -20,10 +20,14 @@ import io.quickauth.sdk.core.TokenProvider
  * [init] throws [IllegalStateException].
  *
  * ```kotlin
+ * // Zero-backend quick start — the publishable key is safe to ship in the APK.
+ * QuickAuth.init(context, publishableKey = "pk_live_…")
+ *
+ * // Or the extra-hardened flow, where your backend mints 10-minute session JWTs:
  * QuickAuth.init(context) {
- *     // Your backend exposes a server-to-server endpoint that mints a 10-min QuickAuth JWT
  *     myApi.fetch("/api/quickauth-token").sessionToken
  * }
+ *
  * val session = QuickAuth.auth.startOTP("+919876543210")
  * val result  = QuickAuth.auth.verifyOTP(session.sessionId, "123456")
  * ```
@@ -52,9 +56,25 @@ object QuickAuth {
     }
 
     /**
+     * Initialise the SDK with a publishable key — the zero-backend quick start.  Equivalent
+     * to `init(context, Config(publishableKey = publishableKey))`.
+     *
+     * The `pk_live_…` / `pk_test_…` key is designed to ship inside your APK: the backend
+     * scopes it to OTP initiate/verify, app-locks it to the package names you register, and
+     * rate-limits it.  No token endpoint is required.
+     */
+    @JvmStatic
+    fun init(context: Context, publishableKey: String) {
+        init(context, Config(publishableKey = publishableKey))
+    }
+
+    /**
      * Initialise the SDK with a fully-formed [Config].  Use this overload when you need to
      * override the API base URL, supply an [Config.initialToken], or enable the unsafe
      * direct-client-credentials escape hatch.
+     *
+     * @throws IllegalArgumentException if neither or both auth modes are configured — see
+     *         [Config.publishableKey] and [Config.onTokenExpiry].
      */
     @JvmStatic
     fun init(context: Context, config: Config) {
@@ -74,6 +94,7 @@ object QuickAuth {
             config = config,
             consentProvider = { path -> consentImpl.allowsRequest(path) },
             tokenManager = tokenManager,
+            applicationId = safeApplicationId(appCtx),
         )
         val smsRetriever = SmsRetriever(appCtx)
         val otpService = OtpService(apiClient, smsRetriever, storage) { config }
@@ -107,6 +128,17 @@ object QuickAuth {
     @JvmStatic
     fun smsRetrieverAppHash(context: Context): String =
         SmsRetriever.computeAppHashForInstalledApp(context)
+
+    /**
+     * Read the host app's package name for the `X-QuickAuth-Package` app-lock header.
+     *
+     * Best effort by design: a mocked or otherwise exotic [Context] can throw here, and no
+     * app-identity header is worth aborting SDK init over. Returning null just omits the
+     * header — which the backend tolerates only while app-lock is disabled, since app-lock
+     * fails closed once enabled with no registered apps.
+     */
+    private fun safeApplicationId(context: Context): String? =
+        runCatching { context.packageName }.getOrNull()?.takeIf { it.isNotBlank() }
 
     /** For tests. */
     internal fun resetForTesting() {
