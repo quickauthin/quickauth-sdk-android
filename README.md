@@ -17,6 +17,30 @@ dependencies {
 
 ## Initialise
 
+Pick **exactly one** auth mode. Passing neither — or both — throws at `init`.
+
+### Publishable key (preview) — zero backend
+
+```kotlin
+class App : Application() {
+    override fun onCreate() {
+        super.onCreate()
+        QuickAuth.init(this, publishableKey = "pk_live_…")
+    }
+}
+```
+
+The key is designed to ship inside your APK: on the backend it is scoped to OTP
+initiate/verify, app-locked to the package names you register, and rate-limited. The SDK
+sends it as `X-QuickAuth-Key`, along with your `applicationId` as `X-QuickAuth-Package`
+so app-locking can match. No token endpoint required.
+
+> **Preview:** backend support for publishable keys is not live yet. This mode returns
+> `401` against production until it ships — use the session-token mode below in the
+> meantime.
+
+### Session token — extra hardened
+
 The SDK uses **ephemeral session JWTs** minted by *your* backend. No long-lived secret ever ships in the APK. This matches the Twilio Verify pattern used by our web + iOS SDKs.
 
 ```kotlin

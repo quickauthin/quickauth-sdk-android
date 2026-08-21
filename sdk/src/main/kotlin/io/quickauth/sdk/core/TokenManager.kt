@@ -16,6 +16,9 @@ import okhttp3.RequestBody.Companion.toRequestBody
 /**
  * Thread-safe ephemeral-token cache used by [ApiClient].
  *
+ * Only used by the session-token auth modes; in publishable-key mode [ApiClient] never
+ * calls into it.
+ *
  *  * Calls [Config.onTokenExpiry] (or directly hits `/v1/sdk/session` in unsafe mode) when:
  *      - no token cached yet
  *      - cached token expires in <[REFRESH_LEEWAY_SECONDS]s
@@ -94,7 +97,13 @@ class TokenManager(
         return if (config.isUnsafeDirectMode) {
             mintFromQuickAuth()
         } else {
-            config.onTokenExpiry()
+            // Config guarantees a provider exists unless we are in publishable-key mode,
+            // where ApiClient never reaches this class. Reaching it anyway is a bug, so
+            // fail loudly rather than silently sending an empty bearer token.
+            config.onTokenExpiry?.invoke()
+                ?: throw IllegalStateException(
+                    "No session token available: the SDK is in publishable-key mode.",
+                )
         }
     }
 
