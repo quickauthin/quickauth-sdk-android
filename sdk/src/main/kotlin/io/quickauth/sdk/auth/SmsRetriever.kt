@@ -29,7 +29,7 @@ import java.security.MessageDigest
  *
  * The class is internal-by-default; consumers interact with it via [OtpService.observeOTP].
  */
-class SmsRetriever(private val context: Context) {
+class SmsRetriever(internal val context: Context) {
 
     /** Returns a cold flow of OTP codes parsed from inbound SMS messages. */
     fun observe(): Flow<String> = callbackFlow {

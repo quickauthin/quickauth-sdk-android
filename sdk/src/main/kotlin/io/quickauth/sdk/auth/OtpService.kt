@@ -6,6 +6,10 @@ import io.quickauth.sdk.OtpChannel
 import io.quickauth.sdk.core.ApiClient
 import io.quickauth.sdk.core.Config
 import io.quickauth.sdk.core.Storage
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -66,12 +70,37 @@ class OtpService internal constructor(
      * [AuthEvent.Verified] (OneTap fired) via [Config.onAuthEvent]. Throws
      * only on validation / transport failure.
      */
-    suspend fun initiate(phone: String, channel: OtpChannel = OtpChannel.AUTO) {
+    /**
+     * @param autoSubmit verify an auto-read code without the caller doing anything. Off by
+     *                   default: an app that already submits from its own observeOTP callback
+     *                   would otherwise submit twice, and the second fails against a code the
+     *                   server has consumed — surfacing as an error after a success.
+     */
+    suspend fun initiate(
+        phone: String,
+        channel: OtpChannel = OtpChannel.AUTO,
+        autoSubmit: Boolean = false,
+    ) {
         require(isValidE164(phone)) {
             "phone must be in E.164 format (e.g. +919876543210), got '$phone'"
         }
         val attemptId = nextAttempt()
         setState(State.Sending(attemptId))
+
+        // Drop any WhatsApp code held from an earlier attempt, then tell WhatsApp a new one is
+        // coming. Both before the request, not after: the receiver holds a code so a zero-tap
+        // arriving before the app was running is not lost, and delivering that against a
+        // restarted request fails verification for reasons the user cannot see — while a
+        // handshake that lands after the template is too late for the message already in
+        // flight.
+        WhatsAppOtpReceiver.clearPending()
+        WhatsAppOtpHandshake.send(smsRetriever.context)
+
+        activePhone = phone
+        activeChannel = channel
+        this.autoSubmit = autoSubmit
+        autoSubmitted = false
+        listenForAutoRead()
 
         val body = mutableMapOf<String, Any>(
             "phone" to phone,
@@ -156,6 +185,7 @@ class OtpService internal constructor(
      * the next [initiate] act like a brand-new install (no OneTap).
      */
     fun reset(forgetDevice: Boolean = false) {
+        stopAutoRead()
         synchronized(stateLock) {
             state = State.Idle
             attemptCounter++   // invalidate any in-flight attempt
@@ -176,16 +206,129 @@ class OtpService internal constructor(
      */
     fun observeOTP(): Flow<String> = smsRetriever.observe()
 
-    /** Callback-style overload. */
-    fun observeOTP(onCode: (String) -> Unit): SmsRetriever.Subscription =
-        smsRetriever.observe { code ->
+    /**
+     * Codes read automatically, from whichever channel delivered them.
+     *
+     * Merges the two, because they are two delivery mechanisms for one thing and a caller
+     * should not have to know which arrived. An OTP sent over SMS is parsed out of the message
+     * body by SmsRetriever; a WhatsApp one-tap or zero-tap code is broadcast to the app by
+     * WhatsApp and arrives already extracted. Listening to only one means a merchant on AUTO
+     * gets auto-read for some users and not others, with nothing to explain the difference.
+     */
+    fun observeOTP(onCode: (String) -> Unit): SmsRetriever.Subscription {
+        val deliver: (String) -> Unit = { code ->
             onCode(code)
             publishAutoReadCode(code)
         }
+        WhatsAppOtpReceiver.setListener(deliver)
+        val smsSub = smsRetriever.observe(deliver)
+        // Detaching the WhatsApp listener alongside the SMS one, so a caller that stops
+        // listening does not leave the receiver holding a reference to their callback.
+        return SmsRetriever.Subscription {
+            WhatsAppOtpReceiver.setListener(null)
+            smsSub.cancel()
+        }
+    }
 
     /** Launch the WhatsApp deep-link login flow. */
     fun startWhatsAppLogin(activity: android.app.Activity, businessNumber: String) {
         WhatsAppLogin(activity).launch(businessNumber)
+    }
+
+    // -- Auto-read --------------------------------------------------------------
+
+    /**
+     * The phone and options of the live attempt, so [resendOtp] needs no arguments.
+     *
+     * A merchant should not have to hold the number themselves to resend to it — they already
+     * gave it to us, and asking again is an opportunity to pass a different one, which would
+     * start a second transaction and leave the user holding two codes.
+     */
+    @Volatile private var activePhone: String? = null
+    @Volatile private var activeChannel: OtpChannel = OtpChannel.AUTO
+
+    @Volatile private var autoSubmit = false
+
+    /**
+     * One auto-submit per attempt. Both sources can deliver — a merchant on AUTO may get the
+     * SMS and the WhatsApp copy — and submitting the second would verify a code the server has
+     * already consumed, surfacing as a spurious failure after a success.
+     */
+    @Volatile private var autoSubmitted = false
+
+    private var autoReadSub: SmsRetriever.Subscription? = null
+
+    /**
+     * Where an auto-submitted verify runs.
+     *
+     * A code arrives on a binder thread with no coroutine context, and submitOtp is suspending,
+     * so it needs a scope of its own. SupervisorJob so one failed verify cannot cancel the
+     * scope and silently disable auto-submit for the rest of the process.
+     */
+    private val autoReadScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    /**
+     * Subscribe on the caller's behalf, so a code is delivered whether or not they listen.
+     *
+     * Without this, auto-read only worked for a caller who happened to call observeOTP: the
+     * WhatsApp receiver holds a code until something listens, so with nobody subscribed it was
+     * received, held, and never delivered — and autoSubmit would do nothing at all, in exactly
+     * the case where the caller was told they need not listen.
+     *
+     * Idempotent across attempts: a resend must not stack subscriptions, and the old one is
+     * dropped first so a code from a previous attempt cannot arrive on it.
+     */
+    private fun listenForAutoRead() {
+        autoReadSub?.cancel()
+        autoReadSub = observeOTP { code -> maybeAutoSubmit(code) }
+    }
+
+    private fun maybeAutoSubmit(code: String) {
+        if (!autoSubmit || autoSubmitted) return
+        autoSubmitted = true
+        autoReadScope.launch {
+            try {
+                submitOtp(code)
+            } catch (t: Throwable) {
+                // Already surfaced through the event stream; a throw here has nowhere to go.
+            }
+        }
+    }
+
+    /**
+     * Send the code again, to the number the current attempt is already for.
+     *
+     * Within the merchant's expiry window the server returns the SAME code and pushes the
+     * expiry forward, so a user who missed the first message gets that message again rather
+     * than a second code to choose between. Past the window it issues a fresh one.
+     *
+     * Takes no phone number deliberately: the merchant already gave us one, and asking again
+     * is an opportunity to pass a different one by accident — which would start a separate
+     * transaction and leave the user holding two codes, only one of which works.
+     *
+     * Carries the original attempt's channel and autoSubmit setting, so a resend behaves like
+     * the request it repeats rather than silently reverting to defaults. It also re-sends the
+     * WhatsApp handshake, which Meta expires after ten minutes — a user who waits before
+     * tapping resend would otherwise get a message their app can no longer auto-read.
+     *
+     * @throws IllegalStateException if there is no attempt to resend. That is a programming
+     *         error rather than a runtime condition: a resend button should only exist once a
+     *         code has been sent.
+     */
+    suspend fun resendOtp() {
+        val phone = activePhone
+            ?: throw IllegalStateException("resendOtp: nothing to resend — call initiate() first.")
+        initiate(phone, activeChannel, autoSubmit)
+    }
+
+    /** Stop listening for auto-read codes. Safe to call twice. */
+    private fun stopAutoRead() {
+        autoReadSub?.cancel()
+        autoReadSub = null
+        autoSubmit = false
+        // Nothing left to resend to: a reset ends the attempt, and resending afterwards would
+        // message someone who is no longer mid-login.
+        activePhone = null
     }
 
     // -- Internals ----------------------------------------------------------
