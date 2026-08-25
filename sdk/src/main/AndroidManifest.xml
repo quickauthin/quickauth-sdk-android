@@ -9,4 +9,43 @@
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- No permissions — SMS Retriever + Install Referrer require none. -->
+
+    <!--
+      Android 11 (API 30) filters which other apps a package can see, and that filtering
+      applies to an explicit broadcast just as it does to a query: setPackage("com.whatsapp")
+      on a device where WhatsApp is invisible to us delivers nothing.
+
+      The zero-tap handshake is exactly that kind of broadcast, so without this an app
+      targeting API 30+ — which is every app now — silently fails to hand WhatsApp the
+      handshake, and zero-tap cannot work no matter how correct the template, hash and
+      receiver are. Nothing throws; the broadcast is simply dropped.
+
+      Both packages, because the user's code arrives on whichever WhatsApp they have.
+    -->
+    <queries>
+        <package android:name="com.whatsapp" />
+        <package android:name="com.whatsapp.w4b" />
+    </queries>
+
+    <application>
+        <!--
+          WhatsApp delivers a zero-tap or one-tap code by broadcasting to the app, not by SMS,
+          so SmsRetriever never sees it. Declared statically rather than registered at runtime
+          because the code can arrive while the app is backgrounded or not running.
+
+          No android:permission, deliberately: Android silently refuses to deliver a broadcast
+          to a receiver guarded by a permission the sender does not hold, so a guessed
+          permission name produces a receiver that never fires. Meta's documented receiver
+          declares exported="true" and no permission. What keeps this safe is WhatsApp's own
+          package + signing-hash check, which an attacker cannot satisfy without the key.
+        -->
+        <receiver
+            android:name="io.quickauth.sdk.auth.WhatsAppOtpReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.whatsapp.otp.OTP_RETRIEVED" />
+            </intent-filter>
+        </receiver>
+    </application>
 </manifest>

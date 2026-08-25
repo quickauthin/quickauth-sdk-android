@@ -73,6 +73,15 @@ class OtpService internal constructor(
         val attemptId = nextAttempt()
         setState(State.Sending(attemptId))
 
+        // Drop any WhatsApp code held from an earlier attempt, then tell WhatsApp a new one is
+        // coming. Both before the request, not after: the receiver holds a code so a zero-tap
+        // arriving before the app was running is not lost, and delivering that against a
+        // restarted request fails verification for reasons the user cannot see — while a
+        // handshake that lands after the template is too late for the message already in
+        // flight.
+        WhatsAppOtpReceiver.clearPending()
+        WhatsAppOtpHandshake.send(smsRetriever.context)
+
         val body = mutableMapOf<String, Any>(
             "phone" to phone,
             "channel" to channel.name.lowercase(),
@@ -176,12 +185,29 @@ class OtpService internal constructor(
      */
     fun observeOTP(): Flow<String> = smsRetriever.observe()
 
-    /** Callback-style overload. */
-    fun observeOTP(onCode: (String) -> Unit): SmsRetriever.Subscription =
-        smsRetriever.observe { code ->
+    /**
+     * Codes read automatically, from whichever channel delivered them.
+     *
+     * Merges the two, because they are two delivery mechanisms for one thing and a caller
+     * should not have to know which arrived. An OTP sent over SMS is parsed out of the message
+     * body by SmsRetriever; a WhatsApp one-tap or zero-tap code is broadcast to the app by
+     * WhatsApp and arrives already extracted. Listening to only one means a merchant on AUTO
+     * gets auto-read for some users and not others, with nothing to explain the difference.
+     */
+    fun observeOTP(onCode: (String) -> Unit): SmsRetriever.Subscription {
+        val deliver: (String) -> Unit = { code ->
             onCode(code)
             publishAutoReadCode(code)
         }
+        WhatsAppOtpReceiver.setListener(deliver)
+        val smsSub = smsRetriever.observe(deliver)
+        // Detaching the WhatsApp listener alongside the SMS one, so a caller that stops
+        // listening does not leave the receiver holding a reference to their callback.
+        return SmsRetriever.Subscription {
+            WhatsAppOtpReceiver.setListener(null)
+            smsSub.cancel()
+        }
+    }
 
     /** Launch the WhatsApp deep-link login flow. */
     fun startWhatsAppLogin(activity: android.app.Activity, businessNumber: String) {
