@@ -19,14 +19,8 @@ import android.util.Log
  * needs it least. That in turn means the code can arrive with nothing listening, so it is held
  * here and flushed the moment something does.
  *
- * Exported with no permission guard, matching Meta's documented declaration. Guarding it would
- * be worse than useless: Android silently drops a broadcast aimed at a receiver whose
- * permission the sender does not hold, so a guessed permission name produces a receiver that
- * never fires, with nothing thrown and nothing logged.
- *
- * Safety comes from WhatsApp's side — it only broadcasts to an app whose package name and
- * signing hash match the approved template, which an attacker cannot satisfy without the
- * signing key. What is left to us is not trusting the payload blindly.
+ * Exported with no permission guard — see the manifest for why. Safety comes from WhatsApp's
+ * own package and signing-hash check; what is left to us is not trusting the payload blindly.
  */
 class WhatsAppOtpReceiver : BroadcastReceiver() {
 
