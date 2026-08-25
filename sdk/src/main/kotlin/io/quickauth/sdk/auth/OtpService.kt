@@ -6,6 +6,10 @@ import io.quickauth.sdk.OtpChannel
 import io.quickauth.sdk.core.ApiClient
 import io.quickauth.sdk.core.Config
 import io.quickauth.sdk.core.Storage
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -66,7 +70,17 @@ class OtpService internal constructor(
      * [AuthEvent.Verified] (OneTap fired) via [Config.onAuthEvent]. Throws
      * only on validation / transport failure.
      */
-    suspend fun initiate(phone: String, channel: OtpChannel = OtpChannel.AUTO) {
+    /**
+     * @param autoSubmit verify an auto-read code without the caller doing anything. Off by
+     *                   default: an app that already submits from its own observeOTP callback
+     *                   would otherwise submit twice, and the second fails against a code the
+     *                   server has consumed — surfacing as an error after a success.
+     */
+    suspend fun initiate(
+        phone: String,
+        channel: OtpChannel = OtpChannel.AUTO,
+        autoSubmit: Boolean = false,
+    ) {
         require(isValidE164(phone)) {
             "phone must be in E.164 format (e.g. +919876543210), got '$phone'"
         }
@@ -81,6 +95,10 @@ class OtpService internal constructor(
         // flight.
         WhatsAppOtpReceiver.clearPending()
         WhatsAppOtpHandshake.send(smsRetriever.context)
+
+        this.autoSubmit = autoSubmit
+        autoSubmitted = false
+        listenForAutoRead()
 
         val body = mutableMapOf<String, Any>(
             "phone" to phone,
@@ -165,6 +183,7 @@ class OtpService internal constructor(
      * the next [initiate] act like a brand-new install (no OneTap).
      */
     fun reset(forgetDevice: Boolean = false) {
+        stopAutoRead()
         synchronized(stateLock) {
             state = State.Idle
             attemptCounter++   // invalidate any in-flight attempt
@@ -212,6 +231,63 @@ class OtpService internal constructor(
     /** Launch the WhatsApp deep-link login flow. */
     fun startWhatsAppLogin(activity: android.app.Activity, businessNumber: String) {
         WhatsAppLogin(activity).launch(businessNumber)
+    }
+
+    // -- Auto-read --------------------------------------------------------------
+
+    @Volatile private var autoSubmit = false
+
+    /**
+     * One auto-submit per attempt. Both sources can deliver — a merchant on AUTO may get the
+     * SMS and the WhatsApp copy — and submitting the second would verify a code the server has
+     * already consumed, surfacing as a spurious failure after a success.
+     */
+    @Volatile private var autoSubmitted = false
+
+    private var autoReadSub: SmsRetriever.Subscription? = null
+
+    /**
+     * Where an auto-submitted verify runs.
+     *
+     * A code arrives on a binder thread with no coroutine context, and submitOtp is suspending,
+     * so it needs a scope of its own. SupervisorJob so one failed verify cannot cancel the
+     * scope and silently disable auto-submit for the rest of the process.
+     */
+    private val autoReadScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    /**
+     * Subscribe on the caller's behalf, so a code is delivered whether or not they listen.
+     *
+     * Without this, auto-read only worked for a caller who happened to call observeOTP: the
+     * WhatsApp receiver holds a code until something listens, so with nobody subscribed it was
+     * received, held, and never delivered — and autoSubmit would do nothing at all, in exactly
+     * the case where the caller was told they need not listen.
+     *
+     * Idempotent across attempts: a resend must not stack subscriptions, and the old one is
+     * dropped first so a code from a previous attempt cannot arrive on it.
+     */
+    private fun listenForAutoRead() {
+        autoReadSub?.cancel()
+        autoReadSub = observeOTP { code -> maybeAutoSubmit(code) }
+    }
+
+    private fun maybeAutoSubmit(code: String) {
+        if (!autoSubmit || autoSubmitted) return
+        autoSubmitted = true
+        autoReadScope.launch {
+            try {
+                submitOtp(code)
+            } catch (t: Throwable) {
+                // Already surfaced through the event stream; a throw here has nowhere to go.
+            }
+        }
+    }
+
+    /** Stop listening for auto-read codes. Safe to call twice. */
+    private fun stopAutoRead() {
+        autoReadSub?.cancel()
+        autoReadSub = null
+        autoSubmit = false
     }
 
     // -- Internals ----------------------------------------------------------
