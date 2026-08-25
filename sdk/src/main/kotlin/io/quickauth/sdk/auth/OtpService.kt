@@ -96,6 +96,8 @@ class OtpService internal constructor(
         WhatsAppOtpReceiver.clearPending()
         WhatsAppOtpHandshake.send(smsRetriever.context)
 
+        activePhone = phone
+        activeChannel = channel
         this.autoSubmit = autoSubmit
         autoSubmitted = false
         listenForAutoRead()
@@ -235,6 +237,16 @@ class OtpService internal constructor(
 
     // -- Auto-read --------------------------------------------------------------
 
+    /**
+     * The phone and options of the live attempt, so [resendOtp] needs no arguments.
+     *
+     * A merchant should not have to hold the number themselves to resend to it — they already
+     * gave it to us, and asking again is an opportunity to pass a different one, which would
+     * start a second transaction and leave the user holding two codes.
+     */
+    @Volatile private var activePhone: String? = null
+    @Volatile private var activeChannel: OtpChannel = OtpChannel.AUTO
+
     @Volatile private var autoSubmit = false
 
     /**
@@ -283,11 +295,40 @@ class OtpService internal constructor(
         }
     }
 
+    /**
+     * Send the code again, to the number the current attempt is already for.
+     *
+     * Within the merchant's expiry window the server returns the SAME code and pushes the
+     * expiry forward, so a user who missed the first message gets that message again rather
+     * than a second code to choose between. Past the window it issues a fresh one.
+     *
+     * Takes no phone number deliberately: the merchant already gave us one, and asking again
+     * is an opportunity to pass a different one by accident — which would start a separate
+     * transaction and leave the user holding two codes, only one of which works.
+     *
+     * Carries the original attempt's channel and autoSubmit setting, so a resend behaves like
+     * the request it repeats rather than silently reverting to defaults. It also re-sends the
+     * WhatsApp handshake, which Meta expires after ten minutes — a user who waits before
+     * tapping resend would otherwise get a message their app can no longer auto-read.
+     *
+     * @throws IllegalStateException if there is no attempt to resend. That is a programming
+     *         error rather than a runtime condition: a resend button should only exist once a
+     *         code has been sent.
+     */
+    suspend fun resendOtp() {
+        val phone = activePhone
+            ?: throw IllegalStateException("resendOtp: nothing to resend — call initiate() first.")
+        initiate(phone, activeChannel, autoSubmit)
+    }
+
     /** Stop listening for auto-read codes. Safe to call twice. */
     private fun stopAutoRead() {
         autoReadSub?.cancel()
         autoReadSub = null
         autoSubmit = false
+        // Nothing left to resend to: a reset ends the attempt, and resending afterwards would
+        // message someone who is no longer mid-login.
+        activePhone = null
     }
 
     // -- Internals ----------------------------------------------------------
