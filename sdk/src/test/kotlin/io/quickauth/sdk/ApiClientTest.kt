@@ -68,6 +68,20 @@ class ApiClientTest {
         // The legacy X-QuickAuth-Public-Key header is gone with the publicKey-based auth model.
         assertNull(recorded.getHeader("X-QuickAuth-Public-Key"))
         assertNotNull("Idempotency-Key must be present", recorded.getHeader("Idempotency-Key"))
+
+        // The version on the wire comes from the build's single `quickauthSdkVersion`
+        // declaration via BuildConfig, not from a literal typed a second time in Config. A
+        // hand-maintained copy is one release away from an AAR published as one version and
+        // reporting another, which makes per-version server-side debugging chase a build that
+        // was never shipped.
+        assertEquals(
+            "quickauth-sdk-android/${BuildConfig.QUICKAUTH_SDK_VERSION}",
+            recorded.getHeader("User-Agent"),
+        )
+        assertTrue(
+            "SDK version must look like semver, got '${Config.SDK_VERSION}'",
+            Config.SDK_VERSION.matches(Regex("""^\d+\.\d+\.\d+(-[A-Za-z0-9.]+)?$""")),
+        )
         assertTrue(
             "User-Agent must identify the SDK",
             recorded.getHeader("User-Agent")?.startsWith("quickauth-sdk-android/") == true,

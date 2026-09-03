@@ -81,15 +81,24 @@ jobs:
           key: gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
           restore-keys: gradle-
 
-      - name: Bump groupId/sdk version to ${{ inputs.version }}
-        # Updates the `version = "..."` line inside the Maven publication
-        # block in sdk/build.gradle.kts. The regex deliberately targets
-        # only the publication's version (4 leading spaces), not other
-        # uses of `version =`.
+      - name: Bump SDK version to ${{ inputs.version }}
+        # There is exactly one version string in the repo: `val quickauthSdkVersion`
+        # at the top of sdk/build.gradle.kts. It feeds both the Maven publication
+        # coordinate and BuildConfig.QUICKAUTH_SDK_VERSION (which Config.SDK_VERSION
+        # and therefore the User-Agent read), so this one rewrite bumps all of them.
+        #
+        # Anchored to the declaration so it cannot also rewrite the publication's
+        # `version = quickauthSdkVersion` reference into a literal. Fails loudly if
+        # the line has moved, rather than publishing the previous version silently.
         run: |
-          sed -i "s/version = \"[^\"]*\"/version = \"${{ inputs.version }}\"/" sdk/build.gradle.kts
+          set -euo pipefail
+          grep -q '^val quickauthSdkVersion = "' sdk/build.gradle.kts \
+            || { echo "::error::version declaration not found in sdk/build.gradle.kts"; exit 1; }
+          sed -i "s/^val quickauthSdkVersion = \"[^\"]*\"/val quickauthSdkVersion = \"${{ inputs.version }}\"/" sdk/build.gradle.kts
           echo "After bump:"
-          grep -n "version = \"" sdk/build.gradle.kts | head -3
+          grep -n 'quickauthSdkVersion' sdk/build.gradle.kts | head -3
+          grep -q "^val quickauthSdkVersion = \"${{ inputs.version }}\"" sdk/build.gradle.kts \
+            || { echo "::error::version bump did not apply"; exit 1; }
 
       - name: Build AAR + run tests
         run: |

@@ -57,6 +57,18 @@ public data class Config(
 
     public companion object {
         public const val DEFAULT_API_BASE_URL: String = "https://api.quickauth.in"
-        public const val SDK_VERSION: String = "1.1.0"
+
+        /**
+         * The SDK version reported in the User-Agent.
+         *
+         * Sourced from `BuildConfig`, which the build script fills from the single
+         * `quickauthSdkVersion` declaration in `sdk/build.gradle.kts` — the same value that
+         * becomes the Maven coordinate. It was a hand-typed literal here as well, which is one
+         * bump away from an AAR published as one version and reporting another on every
+         * request. No longer `const`, because a value read from BuildConfig is not a Kotlin
+         * compile-time constant.
+         */
+        @JvmField
+        public val SDK_VERSION: String = io.quickauth.sdk.BuildConfig.QUICKAUTH_SDK_VERSION
     }
 }
