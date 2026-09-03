@@ -2,6 +2,7 @@ package io.quickauth.sdk.auth
 
 import android.app.Activity
 import android.content.ActivityNotFoundException
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import io.quickauth.sdk.QuickAuth
@@ -22,8 +23,14 @@ import java.util.UUID
  *
  * The Activity that registers the App Link receives the resumed intent and forwards it to
  * [QuickAuth.attribution.captureLaunch] which extracts the `qa_clid` + JWT.
+ *
+ * Takes a [Context] rather than an [Activity] so the facade can expose `QuickAuth.whatsapp`
+ * without holding a screen — an Activity is a Context, so existing call sites are unaffected.
+ * Passing a non-Activity context adds `FLAG_ACTIVITY_NEW_TASK`, which the platform requires.
+ *
+ * Nothing here is the WhatsApp OTP *auto-read* path; that is [WhatsAppOtpRetriever].
  */
-class WhatsAppLogin(private val activity: Activity) {
+class WhatsAppLogin(private val context: Context) {
 
     /**
      * Build the `wa.me` URI and start the activity.  Falls back to the WhatsApp Business
@@ -43,14 +50,27 @@ class WhatsAppLogin(private val activity: Activity) {
             .appendQueryParameter("text", text)
             .build()
         val intent = Intent(Intent.ACTION_VIEW, uri).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            if (context !is Activity) addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         try {
-            activity.startActivity(intent)
+            context.startActivity(intent)
         } catch (e: ActivityNotFoundException) {
             // Try WhatsApp Business as a fallback (same protocol, different package).
             val biz = Intent(intent).setPackage("com.whatsapp.w4b")
-            activity.startActivity(biz)
+            context.startActivity(biz)
         }
     }
+
+    /**
+     * [launch], but reporting failure instead of throwing — matching the Flutter SDK's
+     * `whatsapp.open()`. Returns `false` when neither WhatsApp nor WhatsApp Business can handle
+     * the link, which is a condition a login screen has to render, not crash on.
+     */
+    fun open(businessNumber: String, prefilledMessage: String = "Hi, I want to log in."): Boolean =
+        try {
+            launch(businessNumber, prefilledMessage)
+            true
+        } catch (_: ActivityNotFoundException) {
+            false
+        }
 }
