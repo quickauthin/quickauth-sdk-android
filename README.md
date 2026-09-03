@@ -2,7 +2,7 @@
 
 Phone OTP authentication + WhatsApp marketing attribution for Android, in a single Kotlin library.
 
-`in.quickauth:sdk:1.0.0` — minSdk 21, Compose-first with View-based fallback, zero permissions.
+`in.quickauth:sdk:1.2.0` — minSdk 21, Compose-first with View-based fallback, zero permissions.
 
 ---
 
@@ -11,7 +11,7 @@ Phone OTP authentication + WhatsApp marketing attribution for Android, in a sing
 ```kotlin
 // app/build.gradle.kts
 dependencies {
-    implementation("in.quickauth:sdk:1.0.0")
+    implementation("in.quickauth:sdk:1.2.0")
 }
 ```
 
@@ -100,21 +100,70 @@ QuickAuth.init(
 )
 ```
 
-## Quick start — headless (5 lines)
+## Quick start — headless
+
+Every outcome arrives on one typed event handler. You do not subscribe to anything else.
 
 ```kotlin
-val session = QuickAuth.auth.startOTP("+919876543210", channel = OtpChannel.AUTO)
-QuickAuth.auth.observeOTP { code ->
-    val result = QuickAuth.auth.verifyOTP(session.sessionId, code)
-    // result.verified == true, result.requestId == "req_…", result.message == "Verified successfully"
-    //
-    // Forward result.requestId to YOUR backend, which confirms with QuickAuth via
-    // GET /v1/auth/status?requestId=... (X-Client-Id / X-Client-Secret) and mints
-    // its own session JWT against its own user table.
-    // See https://quickauth.in/docs/backend
-    if (result.verified) sendToMyBackend(result.requestId)
+QuickAuth.setAuthEventHandler { event ->
+    when (event) {
+        is AuthEvent.OtpSent     -> showOtpInput(event.expiresIn)
+        is AuthEvent.OtpAutoRead -> prefill(event.code)          // SMS *and* WhatsApp
+        is AuthEvent.Verified    -> sendToMyBackend(event.requestId)
+        is AuthEvent.OtpFailed   -> showError(event.message)     // still retry-able
+        is AuthEvent.Error       -> showError(event.message)     // final for this attempt
+    }
 }
+
+// autoSubmit = true lets the SDK verify a code it read itself. Off by default.
+QuickAuth.auth.initiate("+919876543210", OtpChannel.AUTO, autoSubmit = true)
+
+// …user types it instead:
+QuickAuth.auth.submitOtp("483920")
+
+// …or never got the message:
+QuickAuth.auth.resendOtp()
 ```
+
+Forward `AuthEvent.Verified.requestId` to YOUR backend, which confirms it with QuickAuth via
+`GET /v1/auth/status?requestId=…` (X-Client-Id / X-Client-Secret) and mints its own session JWT
+against its own user table. See <https://quickauth.in/docs/backend>.
+
+`Verified` also covers silent OneTap re-auth, where no OTP was ever sent.
+
+### resendOtp() takes no arguments
+
+It replays the number the current attempt is already for, carrying that attempt's channel and
+`autoSubmit` setting, and re-sends the WhatsApp handshake (Meta expires it after ten minutes).
+Asking for the phone number again is an opportunity to pass a different one by accident, which
+starts a second transaction and leaves the user holding two codes, only one of which works.
+
+It throws `IllegalStateException` when there is no live attempt — a resend button should only
+exist once a code has been sent. `QuickAuth.auth.reset()` ends the attempt, so a resend after it
+throws too.
+
+### autoSubmit and the one-shot latch
+
+`autoSubmit` is per attempt and latched: the first auto-read code submits, and nothing else does
+until the next `initiate()` / `resendOtp()`. A merchant on `OtpChannel.AUTO` can receive the same
+code over both SMS and WhatsApp, and submitting the second would verify a code the server has
+already consumed — which surfaces to the user as a failure arriving right after a success.
+
+Both copies still reach you as `AuthEvent.OtpAutoRead`; only the submit is latched.
+
+### Facade surface
+
+| Member | What it is |
+|---|---|
+| `QuickAuth.isInitialized` | whether `init` has run |
+| `QuickAuth.config` | the active `Config` |
+| `QuickAuth.tokenManager` | bearer-token cache |
+| `QuickAuth.consent` | DPDP / GDPR gate |
+| `QuickAuth.auth` | the OTP state machine |
+| `QuickAuth.attribution` | click attribution + conversions |
+| `QuickAuth.whatsapp` | "login with WhatsApp" deep-link helper |
+| `QuickAuth.setAuthEventHandler(handler)` | swap the event handler after `init` (pass `null` to detach) |
+| `QuickAuth.reset()` | process-level teardown; use `QuickAuth.auth.reset(forgetDevice = true)` to end a login and drop OneTap trust |
 
 ## Quick start — components (5 lines)
 
@@ -137,24 +186,43 @@ Or in XML:
 
 ---
 
-## SMS auto-read (zero permissions)
+## Auto-read (zero permissions)
 
-QuickAuth uses [Google Play SMS Retriever](https://developers.google.com/identity/sms-retriever/overview) — no permissions required, no privacy banner. Your OTP message body must end with the 11-character app-hash for your release keystore.
+`initiate()` arms auto-read itself. You do **not** have to subscribe to anything for
+`AuthEvent.OtpAutoRead` and `autoSubmit` to work — `observeOTP()` exists for callers who want the
+raw stream as well, and deliberately does not re-emit the event.
 
-Print it during development:
+Two delivery mechanisms feed it, merged, because a merchant on `OtpChannel.AUTO` should not get
+auto-read for some users and not others:
+
+**SMS** — [Google Play SMS Retriever](https://developers.google.com/identity/sms-retriever/overview).
+No permissions, no privacy banner. Your OTP message body must end with the 11-character app-hash
+for the keystore that signed the build. Print it during development:
 
 ```kotlin
 val hash = QuickAuth.smsRetrieverAppHash(applicationContext)
 android.util.Log.d("QA", "Embed this in templates: $hash")
+
+// Rotated your signing key? Every certificate has its own hash and all of them
+// must be registered with the sender:
+SmsRetriever.computeAppHashesForInstalledApp(applicationContext)
 ```
 
-Or via Gradle:
+**WhatsApp zero-tap / one-tap** — WhatsApp does not send these over SMS. It broadcasts the code
+directly to the app named in the approved template's `supported_apps`, matched on package name
+and that same 11-character signing hash, so SMS Retriever never sees it.
 
-```bash
-./gradlew :sdk:computeAppHash
-```
+Everything that needs declaring is in the SDK's own manifest and merges into your app: the
+`OTP_RETRIEVED` receiver (declared statically, so a zero-tap code lands even when your app is
+backgrounded or not running), and `<queries>` for `com.whatsapp` / `com.whatsapp.w4b` so Android
+11+ delivers the handshake the SDK sends before each request. **You configure nothing.**
 
-If your customer's SMS sender isn't ours, the SDK silently falls back to the **SMS User Consent API** (one-tap dialog).
+What you do need, on Meta's side: an approved authentication template with zero-tap or one-tap
+enabled, listing your package name and app-hash under `supported_apps`. If those do not match,
+WhatsApp shows the message and simply never broadcasts the code — no error, anywhere.
+
+If your customer's SMS sender isn't ours, the SDK falls back to the **SMS User Consent API**
+(one-tap dialog).
 
 ---
 
@@ -213,8 +281,12 @@ We never read MAC, IMEI, or `ANDROID_ID` — Play Store policy compliant.
 | SMS User Consent | none |
 | Install Referrer | none |
 | WhatsApp deep-link | none |
+| WhatsApp OTP auto-read | none |
 
-The SDK manifest is **empty**. Your app's existing `INTERNET` permission (declared by AGP automatically) is sufficient.
+The SDK manifest declares **no permissions** — only the WhatsApp `OTP_RETRIEVED` receiver and the
+`<queries>` entries that receiver's handshake needs. `RECEIVE_SMS` in particular is deliberately
+absent: SMS Retriever does not need it, and it is in Play's restricted set, so declaring an unused
+one would force every merchant into a Play Console declaration for nothing. Your app's existing `INTERNET` permission (declared by AGP automatically) is sufficient.
 
 ---
 
@@ -232,9 +304,9 @@ val granted = QuickAuth.consent.get()
 ## Development
 
 ```bash
-./gradlew :sdk:assembleRelease   # build the AAR
-./gradlew :sdk:test              # run unit tests (JUnit + Mockk + Robolectric)
-./gradlew :sdk:computeAppHash    # helper task — see above
+./gradlew :sdk:assembleRelease      # build the AAR
+./gradlew :sdk:testDebugUnitTest    # run unit tests (JUnit + Mockk + Robolectric)
+./gradlew :sdk:computeAppHash       # helper task — see above
 ```
 
 The repo ships a Gradle wrapper pointing at Gradle 8.5; if `gradle/wrapper/gradle-wrapper.jar` is missing in your checkout, regenerate it once with:
@@ -242,6 +314,15 @@ The repo ships a Gradle wrapper pointing at Gradle 8.5; if `gradle/wrapper/gradl
 ```bash
 gradle wrapper --gradle-version 8.5
 ```
+
+---
+
+## Versioning
+
+The SDK version lives in exactly one place: `val quickauthSdkVersion` at the top of
+`sdk/build.gradle.kts`. It becomes the Maven coordinate *and*, via
+`BuildConfig.QUICKAUTH_SDK_VERSION`, the `Config.SDK_VERSION` reported in the `User-Agent` on
+every request. Bump it there; there is no second copy to keep in sync.
 
 ---
 

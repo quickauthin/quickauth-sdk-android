@@ -47,6 +47,13 @@ class MainActivity : ComponentActivity() {
         }
         QuickAuth.consent.set(true)
 
+        // Everything the auth flow does arrives here — including codes the SDK auto-read for
+        // us. Nothing subscribes to observeOTP(): initiate() arms auto-read itself, over SMS
+        // and WhatsApp both.
+        QuickAuth.setAuthEventHandler { event ->
+            android.util.Log.d("QuickAuthSample", "auth event: $event")
+        }
+
         // Capture launch for attribution. Best-effort.
         lifecycleScope.launch {
             runCatching { QuickAuth.attribution.captureLaunch(intent) }
@@ -78,9 +85,18 @@ private fun SampleScreen() {
         BasicTextField(value = phone, onValueChange = { phone = it })
         Button(onClick = {
             scope.launch {
-                runCatching { QuickAuth.auth.initiate(phone, OtpChannel.AUTO) }
+                // autoSubmit: the SDK verifies a code it read itself, once per attempt.
+                runCatching { QuickAuth.auth.initiate(phone, OtpChannel.AUTO, autoSubmit = true) }
             }
         }) { Text("Send OTP (headless)") }
+
+        // No phone number here on purpose — resendOtp() replays the one the live attempt is
+        // already for, with its channel and autoSubmit setting.
+        Button(onClick = {
+            scope.launch {
+                runCatching { QuickAuth.auth.resendOtp() }
+            }
+        }) { Text("Resend OTP") }
 
         QuickAuthOtpField(value = otp, onValueChange = { otp = it }, onCodeFilled = { code ->
             scope.launch {
