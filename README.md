@@ -2,7 +2,7 @@
 
 Phone OTP authentication + WhatsApp marketing attribution for Android, in a single Kotlin library.
 
-`in.quickauth:sdk:1.2.0` — minSdk 21, Compose-first with View-based fallback, zero permissions.
+`in.quickauth:quickauth-android:1.2.0` — minSdk 21, Compose-first with View-based fallback, zero permissions.
 
 ---
 
@@ -11,9 +11,13 @@ Phone OTP authentication + WhatsApp marketing attribution for Android, in a sing
 ```kotlin
 // app/build.gradle.kts
 dependencies {
-    implementation("in.quickauth:sdk:1.2.0")
+    implementation("in.quickauth:quickauth-android:1.2.0")
 }
 ```
+
+> **Renamed in 1.2.0.** The artifact used to be `in.quickauth:sdk`. Only the Maven coordinate
+> changed — the Kotlin package is still `io.quickauth.sdk`, so no import statement moves. Update
+> the dependency line and rebuild.
 
 ## Initialise
 
