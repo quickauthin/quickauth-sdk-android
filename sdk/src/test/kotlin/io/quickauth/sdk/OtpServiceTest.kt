@@ -10,10 +10,17 @@ import io.quickauth.sdk.auth.AuthEvent
 import io.quickauth.sdk.auth.AuthEventHandler
 import io.quickauth.sdk.auth.OtpService
 import io.quickauth.sdk.auth.SmsRetriever
+import io.quickauth.sdk.auth.WhatsAppOtpRetriever
 import io.quickauth.sdk.core.ApiClient
 import io.quickauth.sdk.core.ApiException
 import io.quickauth.sdk.core.Config
 import io.quickauth.sdk.core.Storage
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -256,5 +263,299 @@ class OtpServiceTest {
         assertEquals(1, events.size)
         val ev = events[0] as AuthEvent.OtpAutoRead
         assertEquals("987654", ev.code)
+    }
+
+    // ======================================================================
+    // Flutter-parity surface: resendOtp, self-armed auto-read, autoSubmit,
+    // and the WhatsApp handshake.
+    // ======================================================================
+
+    private val smsCodes = MutableSharedFlow<String>(extraBufferCapacity = 8)
+    private val waCodes = MutableSharedFlow<String>(extraBufferCapacity = 8)
+
+    /** Ordered log of the side effects whose sequence actually matters. */
+    private val calls = mutableListOf<String>()
+
+    private val whatsApp = mockk<WhatsAppOtpRetriever>().also {
+        every { it.observe() } returns waCodes
+        every { it.clearPending() } answers { calls.add("clearPending") }
+        every { it.sendHandshake() } answers { calls.add("handshake"); "req-1" }
+    }
+
+    /** Bodies of every `/v1/sdk/auth/initiate` POST, in order. */
+    private val initiateBodies = mutableListOf<Map<String, Any>>()
+
+    /**
+     * A service whose auto-read subscription and auto-submit run on the test's own scheduler,
+     * so a code emitted below is handled before the assertion instead of on a background
+     * thread the test would have to poll for.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private fun TestScope.parityService(): OtpService {
+        every { sms.observe() } returns smsCodes
+        return OtpService(
+            api,
+            sms,
+            storage,
+            whatsApp,
+            CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
+        ) { config }
+    }
+
+    private fun stubInitiate(sessionId: String = "sess_1") {
+        coEvery {
+            api.postJson(eq("/v1/sdk/auth/initiate"), capture(initiateBodies), OtpService.InitiateResponse::class.java)
+        } answers {
+            calls.add("initiate")
+            OtpService.InitiateResponse(
+                state = "OTP_SENT",
+                sessionId = sessionId,
+                expiresIn = 300,
+                deviceToken = null,
+            )
+        }
+    }
+
+    private fun stubVerify() {
+        coEvery {
+            api.postJson(eq("/v1/sdk/auth/verify"), any(), OtpService.VerifyResponse::class.java)
+        } answers {
+            calls.add("verify")
+            OtpService.VerifyResponse(
+                state = "VERIFIED",
+                verified = true,
+                requestId = "req_abc",
+                message = "Verified successfully",
+            )
+        }
+    }
+
+    // -- resendOtp ----------------------------------------------------------
+
+    @Test fun `resendOtp replays the phone, channel and autoSubmit of the live attempt`() = runTest {
+        stubInitiate()
+        val svc = parityService()
+
+        svc.initiate("+919876543210", OtpChannel.WHATSAPP, autoSubmit = true)
+        svc.resendOtp()
+
+        assertEquals(2, initiateBodies.size)
+        assertEquals("+919876543210", initiateBodies[1]["phone"])
+        assertEquals("whatsapp", initiateBodies[1]["channel"])
+        // autoSubmit is not on the wire — it is proven by the resend still auto-submitting.
+        stubVerify()
+        waCodes.emit("445566")
+        advanceUntilIdle()
+        assertTrue(calls.contains("verify"))
+    }
+
+    @Test fun `resendOtp re-sends the WhatsApp handshake, which Meta expires after ten minutes`() = runTest {
+        stubInitiate()
+        val svc = parityService()
+
+        svc.initiate("+919876543210")
+        svc.resendOtp()
+
+        assertEquals(2, calls.count { it == "handshake" })
+    }
+
+    @Test fun `resendOtp before any attempt throws`() = runTest {
+        val svc = parityService()
+        try {
+            svc.resendOtp()
+            fail("expected IllegalStateException")
+        } catch (e: IllegalStateException) {
+            assertTrue(e.message!!.contains("nothing to resend"))
+        }
+    }
+
+    @Test fun `resendOtp after reset throws — the attempt is over`() = runTest {
+        stubInitiate()
+        val svc = parityService()
+
+        svc.initiate("+919876543210")
+        svc.reset()
+
+        try {
+            svc.resendOtp()
+            fail("expected IllegalStateException")
+        } catch (_: IllegalStateException) { /* expected */ }
+    }
+
+    // -- initiate arms auto-read itself -------------------------------------
+
+    @Test fun `initiate arms auto-read without the caller ever collecting observeOTP`() = runTest {
+        // The most-missed piece: a merchant told they need not subscribe got nothing at all,
+        // because the code was received, held, and never delivered.
+        stubInitiate()
+        val svc = parityService()
+
+        svc.initiate("+919876543210")
+        smsCodes.emit("483920")
+        advanceUntilIdle()
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertEquals(listOf("OtpSent", "OtpAutoRead"), events.map { it::class.simpleName })
+        assertEquals("483920", (events[1] as AuthEvent.OtpAutoRead).code)
+    }
+
+    @Test fun `auto-read merges WhatsApp as well as SMS`() = runTest {
+        // Listening to only SMS — all that was possible before — means a merchant on AUTO gets
+        // auto-read for some users and not others, with nothing to explain the difference.
+        stubInitiate()
+        val svc = parityService()
+
+        svc.initiate("+919876543210", OtpChannel.AUTO)
+        waCodes.emit("112233")
+        advanceUntilIdle()
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertEquals(listOf("OtpSent", "OtpAutoRead"), events.map { it::class.simpleName })
+        assertEquals("112233", (events[1] as AuthEvent.OtpAutoRead).code)
+    }
+
+    @Test fun `a resend does not stack auto-read subscriptions`() = runTest {
+        stubInitiate()
+        val svc = parityService()
+
+        svc.initiate("+919876543210")
+        svc.resendOtp()
+        smsCodes.emit("483920")
+        advanceUntilIdle()
+        shadowOf(Looper.getMainLooper()).idle()
+
+        // One OtpAutoRead, not one per attempt ever started.
+        assertEquals(1, events.count { it is AuthEvent.OtpAutoRead })
+    }
+
+    @Test fun `reset stops auto-read`() = runTest {
+        stubInitiate()
+        val svc = parityService()
+
+        svc.initiate("+919876543210")
+        svc.reset()
+        events.clear()
+        smsCodes.emit("483920")
+        advanceUntilIdle()
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertTrue(events.isEmpty())
+    }
+
+    // -- autoSubmit + one-shot latch ----------------------------------------
+
+    @Test fun `autoSubmit is off by default`() = runTest {
+        stubInitiate()
+        stubVerify()
+        val svc = parityService()
+
+        svc.initiate("+919876543210")
+        smsCodes.emit("483920")
+        advanceUntilIdle()
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertFalse("verify must not be called unless autoSubmit was asked for", calls.contains("verify"))
+        assertEquals(listOf("OtpSent", "OtpAutoRead"), events.map { it::class.simpleName })
+    }
+
+    @Test fun `autoSubmit verifies the auto-read code`() = runTest {
+        stubInitiate()
+        stubVerify()
+        val svc = parityService()
+
+        svc.initiate("+919876543210", autoSubmit = true)
+        smsCodes.emit("483920")
+        advanceUntilIdle()
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertEquals(
+            listOf("OtpSent", "OtpAutoRead", "Verified"),
+            events.map { it::class.simpleName },
+        )
+    }
+
+    @Test fun `the one-shot latch stops the SMS and WhatsApp copies both submitting`() = runTest {
+        // A merchant on AUTO can get the same code twice. The second submit would verify a code
+        // the server has already consumed, surfacing as a spurious failure right after success.
+        stubInitiate()
+        stubVerify()
+        val svc = parityService()
+
+        svc.initiate("+919876543210", OtpChannel.AUTO, autoSubmit = true)
+        smsCodes.emit("483920")
+        waCodes.emit("483920")
+        advanceUntilIdle()
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertEquals(1, calls.count { it == "verify" })
+        // Both codes still surface as auto-read; only the submit is latched.
+        assertEquals(2, events.count { it is AuthEvent.OtpAutoRead })
+        assertEquals(1, events.count { it is AuthEvent.Verified })
+    }
+
+    @Test fun `the latch is per attempt, so a resend can auto-submit again`() = runTest {
+        stubInitiate()
+        stubVerify()
+        val svc = parityService()
+
+        svc.initiate("+919876543210", autoSubmit = true)
+        smsCodes.emit("483920")
+        advanceUntilIdle()
+        svc.resendOtp()
+        smsCodes.emit("112233")
+        advanceUntilIdle()
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertEquals(2, calls.count { it == "verify" })
+    }
+
+    @Test fun `publishAutoReadCode honours the same latch`() = runTest {
+        stubInitiate()
+        stubVerify()
+        val svc = parityService()
+
+        svc.initiate("+919876543210", autoSubmit = true)
+        svc.publishAutoReadCode("483920")
+        svc.publishAutoReadCode("483920")
+        advanceUntilIdle()
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertEquals(1, calls.count { it == "verify" })
+    }
+
+    // -- WhatsApp handshake ordering ----------------------------------------
+
+    @Test fun `the handshake goes out before the OTP is requested`() = runTest {
+        // WhatsApp checks for a live handshake when it receives the template. One sent
+        // afterwards is too late for the message already in flight, and the failure is
+        // invisible: the message shows, the code is never broadcast, nothing errors.
+        stubInitiate()
+        val svc = parityService()
+
+        svc.initiate("+919876543210")
+
+        assertEquals(listOf("clearPending", "handshake", "initiate"), calls)
+    }
+
+    @Test fun `a code held from an abandoned attempt is dropped before the new one starts`() = runTest {
+        stubInitiate()
+        val svc = parityService()
+
+        svc.initiate("+919876543210")
+
+        verify { whatsApp.clearPending() }
+        assertTrue(calls.indexOf("clearPending") < calls.indexOf("initiate"))
+    }
+
+    @Test fun `a WhatsApp failure does not stop the OTP being sent`() = runTest {
+        // A missing handshake costs auto-read, not the login.
+        every { whatsApp.sendHandshake() } returns null
+        stubInitiate()
+        val svc = parityService()
+
+        svc.initiate("+919876543210")
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertEquals(listOf("OtpSent"), events.map { it::class.simpleName })
     }
 }

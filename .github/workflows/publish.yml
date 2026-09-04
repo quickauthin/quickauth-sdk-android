@@ -8,10 +8,16 @@ name: Publish to Maven Central
 #   2. Runs :sdk:assembleRelease + :sdk:testDebugUnitTest
 #   3. Signs + uploads the bundle to Sonatype Central Portal via the
 #      com.gradleup.nmcp plugin (`publishAllPublicationsToCentralPortal`)
-#      with publicationType=USER_MANAGED — bundle lands in your Sonatype
-#      portal "Deployments" tab, you click Publish to release to Maven
-#      Central proper
-#   4. Commits the version bump, tags as v<version>, pushes
+#      with publicationType=AUTOMATIC — the portal validates and releases
+#      the bundle to Maven Central without anyone clicking anything
+#   4. POLLS repo1.maven.org until the artifact is actually resolvable,
+#      and fails the job if it never shows up
+#   5. Only then commits the version bump, tags as v<version>, pushes
+#
+# Step 4 is not optional ceremony. v1.1.0 ran under publicationType=USER_MANAGED:
+# the upload succeeded, the job went green, the tag was pushed — and the bundle sat
+# unreleased in the portal's Deployments tab, so `in.quickauth:sdk:1.1.0` never
+# existed for any consumer. A tag in this repo now means the artifact resolved.
 #
 # One-time setup (per repo):
 #   Settings → Secrets and variables → Actions → New repository secret:
@@ -42,7 +48,9 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Generous, because the last step waits on the Maven Central CDN, which routinely
+    # takes 10-30 minutes to expose a freshly released artifact.
+    timeout-minutes: 75
 
     steps:
       - name: Validate version input
@@ -81,15 +89,24 @@ jobs:
           key: gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
           restore-keys: gradle-
 
-      - name: Bump groupId/sdk version to ${{ inputs.version }}
-        # Updates the `version = "..."` line inside the Maven publication
-        # block in sdk/build.gradle.kts. The regex deliberately targets
-        # only the publication's version (4 leading spaces), not other
-        # uses of `version =`.
+      - name: Bump SDK version to ${{ inputs.version }}
+        # There is exactly one version string in the repo: `val quickauthSdkVersion`
+        # at the top of sdk/build.gradle.kts. It feeds both the Maven publication
+        # coordinate and BuildConfig.QUICKAUTH_SDK_VERSION (which Config.SDK_VERSION
+        # and therefore the User-Agent read), so this one rewrite bumps all of them.
+        #
+        # Anchored to the declaration so it cannot also rewrite the publication's
+        # `version = quickauthSdkVersion` reference into a literal. Fails loudly if
+        # the line has moved, rather than publishing the previous version silently.
         run: |
-          sed -i "s/version = \"[^\"]*\"/version = \"${{ inputs.version }}\"/" sdk/build.gradle.kts
+          set -euo pipefail
+          grep -q '^val quickauthSdkVersion = "' sdk/build.gradle.kts \
+            || { echo "::error::version declaration not found in sdk/build.gradle.kts"; exit 1; }
+          sed -i "s/^val quickauthSdkVersion = \"[^\"]*\"/val quickauthSdkVersion = \"${{ inputs.version }}\"/" sdk/build.gradle.kts
           echo "After bump:"
-          grep -n "version = \"" sdk/build.gradle.kts | head -3
+          grep -n 'quickauthSdkVersion' sdk/build.gradle.kts | head -3
+          grep -q "^val quickauthSdkVersion = \"${{ inputs.version }}\"" sdk/build.gradle.kts \
+            || { echo "::error::version bump did not apply"; exit 1; }
 
       - name: Build AAR + run tests
         run: |
@@ -97,16 +114,86 @@ jobs:
           ./gradlew :sdk:assembleRelease :sdk:testDebugUnitTest --no-daemon
 
       - name: Publish to Sonatype Central Portal
-        # USER_MANAGED — bundle uploads to Sonatype Portal as a staged
-        # deployment. Click "Publish" on the portal to release to Maven
-        # Central proper. (Switch to AUTOMATIC in sdk/build.gradle.kts
-        # if you want one-step releases.)
+        # publicationType=AUTOMATIC in sdk/build.gradle.kts — the portal validates
+        # and releases the bundle itself. A green step here still only means
+        # "upload accepted"; the next step is what proves it was released.
         env:
           ORG_GRADLE_PROJECT_sonatypeUsername: ${{ secrets.SONATYPE_USERNAME }}
           ORG_GRADLE_PROJECT_sonatypePassword: ${{ secrets.SONATYPE_PASSWORD }}
           ORG_GRADLE_PROJECT_signingKey: ${{ secrets.SIGNING_KEY }}
           ORG_GRADLE_PROJECT_signingPassword: ${{ secrets.SIGNING_PASSWORD }}
         run: ./gradlew :sdk:publishAllPublicationsToCentralPortal --no-daemon
+
+      # ---------------------------------------------------------------------
+      # RELEASE GATE. Everything below this step — the tag, the push — is
+      # allowed to happen only because this step proved the artifact is really
+      # on Maven Central. Do not move the tagging above it, and do not add
+      # `continue-on-error` here. The whole point is that a green run of this
+      # workflow is evidence a consumer can resolve the dependency.
+      # ---------------------------------------------------------------------
+      - name: Verify artifact is resolvable on Maven Central
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -uo pipefail
+
+          BASE="https://repo1.maven.org/maven2/in/quickauth/quickauth-android/${VERSION}"
+          POM="${BASE}/quickauth-android-${VERSION}.pom"
+          AAR="${BASE}/quickauth-android-${VERSION}.aar"
+
+          # The portal releases, then the CDN fans out. 10-30 min is normal, so the
+          # deadline is deliberately longer than the worst case we have observed.
+          DEADLINE=$(( $(date +%s) + 2700 ))   # 45 minutes
+          ATTEMPT=0
+
+          echo "Polling ${BASE}/"
+
+          http_code() {
+            local code
+            code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 "$@" 2>/dev/null || true)
+            [ -n "$code" ] || code="000"
+            echo "$code"
+          }
+
+          while :; do
+            ATTEMPT=$((ATTEMPT + 1))
+            DIR_CODE=$(http_code "${BASE}/")
+            POM_CODE=$(http_code -I "${POM}")
+            AAR_CODE=$(http_code -I "${AAR}")
+            echo "attempt ${ATTEMPT}  dir=${DIR_CODE}  pom=${POM_CODE}  aar=${AAR_CODE}"
+
+            if [ "$DIR_CODE" = "200" ] && [ "$POM_CODE" = "200" ] && [ "$AAR_CODE" = "200" ]; then
+              echo "Directory, POM and AAR all resolve."
+              break
+            fi
+
+            if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+              echo "::error::in.quickauth:quickauth-android:${VERSION} is still not resolvable at ${BASE}/ after 45 minutes (last codes dir=${DIR_CODE} pom=${POM_CODE} aar=${AAR_CODE}). The bundle was uploaded but not released — check https://central.sonatype.com Deployments for a validation failure. NOT tagging; this version has not shipped."
+              exit 1
+            fi
+
+            sleep 30
+          done
+
+          # A 200 only says *something* is at that path. Confirm the POM really carries
+          # the coordinate we believe we published, so a wrong-artifact upload or a stale
+          # CDN object cannot walk through this gate.
+          curl -sS --max-time 30 "$POM" -o published.pom
+          for expected in \
+            "<groupId>in.quickauth</groupId>" \
+            "<artifactId>quickauth-android</artifactId>" \
+            "<version>${VERSION}</version>"
+          do
+            if ! grep -qF "$expected" published.pom; then
+              echo "::error::Published POM at ${POM} does not contain ${expected}. Refusing to tag."
+              echo "--- POM as published ---"
+              cat published.pom
+              exit 1
+            fi
+          done
+          rm -f published.pom
+
+          echo "Verified: in.quickauth:quickauth-android:${VERSION} is live on Maven Central."
 
       - name: Configure git author
         run: |
@@ -123,12 +210,11 @@ jobs:
       - name: Summary
         run: |
           {
-            echo "## ✅ Bundle uploaded for in.quickauth:sdk:${{ inputs.version }}"
+            echo "## ✅ Released in.quickauth:quickauth-android:${{ inputs.version }}"
             echo ""
-            echo "⚠️ **One more click needed:** go to https://central.sonatype.com → Deployments →"
-            echo "find the new staged deployment → click **Publish**. It takes ~10-30 min after"
-            echo "that to appear on Maven Central CDN."
+            echo "Verified resolvable on Maven Central before tagging — no manual portal step."
             echo ""
-            echo "- Dependency: \`implementation(\"in.quickauth:sdk:${{ inputs.version }}\")\`"
+            echo "- Dependency: \`implementation(\"in.quickauth:quickauth-android:${{ inputs.version }}\")\`"
+            echo "- Artifact: <https://repo1.maven.org/maven2/in/quickauth/quickauth-android/${{ inputs.version }}/>"
             echo "- Tag: \`v${{ inputs.version }}\`"
           } >> $GITHUB_STEP_SUMMARY

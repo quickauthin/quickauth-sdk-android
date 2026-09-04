@@ -6,11 +6,33 @@ plugins {
     id("com.gradleup.nmcp")
 }
 
+// ---------------------------------------------------------------------------
+// SINGLE SOURCE OF TRUTH for the SDK version.
+//
+// It feeds three places that must never disagree:
+//   * the Maven publication coordinate (in.quickauth:quickauth-android:<version>)
+//   * BuildConfig.QUICKAUTH_SDK_VERSION, which Config.SDK_VERSION reads
+//   * the User-Agent every request carries
+//
+// Config.SDK_VERSION used to be a hand-typed copy of this string, so the AAR could — and at
+// least once did — publish under one version while reporting another on the wire. Server-side
+// per-version debugging then chases a version that was never shipped. Bump here only.
+//
+// .github/workflows/publish.yml rewrites the line below by regex; keep the `val quickauthSdkVersion = "…"`
+// shape if you move it.
+// ---------------------------------------------------------------------------
+val quickauthSdkVersion = "1.2.0"
+
 nmcp {
     publishAllPublications {
         username = (findProperty("sonatypeUsername") as String?) ?: System.getenv("SONATYPE_USERNAME") ?: ""
         password = (findProperty("sonatypePassword") as String?) ?: System.getenv("SONATYPE_PASSWORD") ?: ""
-        publicationType = "USER_MANAGED"
+        // AUTOMATIC — the uploaded bundle is validated and *released* to Maven Central by the
+        // portal itself. USER_MANAGED leaves it sitting in the "Deployments" tab waiting for a
+        // human to click Publish, which is exactly how v1.1.0 tagged green while nothing ever
+        // landed on repo1. Do not switch this back without also removing the release tagging
+        // from .github/workflows/publish.yml.
+        publicationType = "AUTOMATIC"
     }
 }
 
@@ -22,6 +44,9 @@ android {
         minSdk = 21
         consumerProguardFiles("consumer-rules.pro")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        // AGP 8 removed VERSION_NAME from library BuildConfig, so the version travels as our
+        // own field. Config.SDK_VERSION reads it; nothing else hard-codes a version string.
+        buildConfigField("String", "QUICKAUTH_SDK_VERSION", "\"$quickauthSdkVersion\"")
     }
 
     buildFeatures {
@@ -105,15 +130,20 @@ dependencies {
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 }
 
-// Publishing — Maven Central group in.quickauth, artifact sdk.
+// Publishing — Maven Central group in.quickauth, artifact quickauth-android.
+//
+// The groupId stays `in.quickauth`: that namespace is DNS-verified against quickauth.in and is
+// reclaimable by the new Sonatype account. Only the artifactId moved off the old `sdk` name.
+// The Kotlin package (io.quickauth.sdk) and the Android namespace are deliberately untouched —
+// renaming those would break every consumer's import statements.
 afterEvaluate {
     publishing {
         publications {
             register<MavenPublication>("release") {
                 from(components["release"])
                 groupId = "in.quickauth"
-                artifactId = "sdk"
-                version = "1.1.0"
+                artifactId = "quickauth-android"
+                version = quickauthSdkVersion
                 pom {
                     name.set("QuickAuth Android SDK")
                     description.set("Phone OTP auth + WhatsApp marketing attribution SDK for Android.")
